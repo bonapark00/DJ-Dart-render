@@ -1,48 +1,57 @@
 import dart_fss as dart
 import pandas as pd
-from pandas import to_datetime
 import gc
 
+# DART API 키 설정 (본인의 API 키로 변경하세요)
+# dart.set_api_key(api_key='YOUR_DART_API_KEY')
+# 보안을 위해 실제 서비스에서는 환경 변수 등으로 관리하는 것이 좋습니다.
+try:
+    dart.set_api_key(api_key='8b1e1ecff1d195b34f0af2b7cc263e09275bfedf')
+except Exception as e:
+    print(f"DART API 키 설정 오류: {e}. API 키를 확인해주세요.")
 
-dart.set_api_key(api_key='8b1e1ecff1d195b34f0af2b7cc263e09275bfedf')
-
-def extract_df(reports, separate = False): # 연결(False, 기본)
-
-    # 결과 누적 리스트
+def extract_df_for_year(reports, year, separate=False):
+    """
+    주어진 보고서 리스트에서 특정 연도의 재무제표 데이터를 추출합니다.
+    """
     df_list = []
-
+    
+    # 컬럼 이름을 위한 정의 (DART API 응답 형식에 따라 변경될 수 있음)
     col_label_ko_00 = ('[D431410] 단일 포괄손익계산서, 기능별 분류, 세후 - 연결 | Statement of comprehensive income, by function of expense - Consolidated financial statements (Unit: KRW)', 'label_ko')
     col_label_ko_01 = ('[D310000] 손익계산서, 기능별 분류 - 연결 | Income statement, by function of expense - Consolidated financial statements (Unit: KRW)', 'label_ko')
     col_label_ko_10 = ('[D431410] Statement of comprehensive income, by function of expense - Consolidated financial statements (Unit: KRW)', 'label_ko')
     col_label_ko_11 = ('[D310000] Income statement, by function of expense - Consolidated financial statements (Unit: KRW)', 'label_ko')
 
-
     prev_report_nm = ''
 
-    for report in reports:
+    # 해당 연도에 해당하는 보고서만 필터링
+    # DART API에서 직접 연도별 필터링이 가능하면 더욱 효율적이지만,
+    # 여기서는 이미 가져온 reports 리스트에서 연도 필터링을 수행합니다.
+    # report.rcept_dt (접수일자)를 기준으로 해당 연도의 보고서만 처리
+    reports_for_year = [r for r in reports if r.rcept_dt.startswith(str(year))]
+
+    for report in reports_for_year:
         try:
-            
             # 개정정정이 존재하는 경우, 그 다음 기존 보고서는 건너뛴다(가장 최근 데이터만 사용)
             if prev_report_nm == report.report_nm[-9:]:
                 continue
             else:
                 prev_report_nm = report.report_nm[-9:]
-            
+
             xbrl = report.xbrl
-            
+
             # 연결재무제표 있는 경우만 수집
             if not xbrl.exist_consolidated():
                 continue
 
-            cf_list = xbrl.get_income_statement(separate = separate)
+            cf_list = xbrl.get_income_statement(separate=separate)
             if not cf_list:
                 continue
-            
+
             cf = cf_list[0]
             df = cf.to_DataFrame(show_class=False)
-            
+
             new_columns = []
-            
             for col in df.columns:
                 if col == col_label_ko_00 or col == col_label_ko_01:
                     new_columns.append('label_ko_0')
@@ -50,224 +59,205 @@ def extract_df(reports, separate = False): # 연결(False, 기본)
                     new_columns.append('label_ko_1')
                 else:
                     new_columns.append(col)
-            df.columns = new_columns        
-            
-            
+            df.columns = new_columns
+
             filter_columns = [col for col in df.columns if \
-                col[1][0] in ('연결재무제표', '별도재무제표') or \
-                col == 'label_ko_0' or\
-                col == 'label_ko_1']
+                              (isinstance(col, tuple) and (col[1][0] in ('연결재무제표', '별도재무제표'))) or \
+                              col == 'label_ko_0' or \
+                              col == 'label_ko_1']
             
-            df = df[filter_columns]
-            
-            
-            # 연도 추출 (보고서 제출일 기준)
-            year = report.rcept_dt[:4]
-            
-            # 연도 정보를 컬럼으로 추가
-            # df['year'] = year
+            # 현재 처리 중인 연도와 관련된 컬럼만 필터링합니다.
+            # 예를 들어, ('20240101-20240331', ('연결재무제표',)) 와 같은 컬럼
+            current_year_cols = [col for col in filter_columns if isinstance(col, tuple) and col[0].startswith(str(year))]
+            # label_ko_0 또는 label_ko_1 컬럼도 포함
+            current_year_cols += [col for col in filter_columns if not isinstance(col, tuple)]
+
+            df = df[current_year_cols]
 
             df_list.append(df)
 
         except Exception as e:
-            print(f"❌ 오류 발생: {report.rcept_no} / {e}")
+            print(f"❌ 오류 발생 (보고서 {report.rcept_no}, 연도 {year}): {e}")
             continue
 
-    # 모든 연도별 현금흐름표를 하나의 DF로 병합
+    if not df_list:
+        return pd.DataFrame(), pd.DataFrame() # 빈 DataFrame 반환
+
+    # 모든 연도별 현금흐름표를 하나의 DF로 병합 (이 시점에서는 해당 연도 데이터만 있음)
     df_all = pd.concat(df_list, ignore_index=True)
     
-    ## garbage collect
     del df_list
     gc.collect()
-    
+
     if 'label_ko_1' in df_all.columns:
         df_all['label_ko'] = df_all['label_ko_0'].combine_first(df_all['label_ko_1'])
-        df_all.drop(columns = ['label_ko_0', 'label_ko_1'], inplace=True)
+        df_all.drop(columns=['label_ko_0', 'label_ko_1'], inplace=True)
     else:
         df_all['label_ko'] = df_all['label_ko_0']
-        df_all.drop(columns = ['label_ko_0'], inplace=True)
-        
-    # label_ko_0,1 정보들도 합쳐주기
-    df_all = df_all.groupby('label_ko', as_index=False).first()
+        df_all.drop(columns=['label_ko_0'], inplace=True)
 
+    df_all = df_all.groupby('label_ko', as_index=False).first()
 
     cols = df_all.columns
 
-    # 'label_ko'는 string이고 나머지는 tuple로 되어 있으므로 따로 분리
     label_col = [col for col in cols if col == 'label_ko']
 
-    # 연결재무제표와 별도재무제표로 분리
+    # 연결재무제표와 별도재무제표로 분리 (해당 연도 데이터만 포함)
     consol_cols = [col for col in cols if isinstance(col, tuple) and col[1][0] == '연결재무제표']
     separate_cols = [col for col in cols if isinstance(col, tuple) and col[1][0] == '별도재무제표']
 
-    # 정렬: 최근 날짜 순 (내림차순)
     consol_cols_sorted = sorted(consol_cols, key=lambda x: x[0], reverse=True)
     separate_cols_sorted = sorted(separate_cols, key=lambda x: x[0], reverse=True)
 
-    # 최종 컬럼 순서: label_ko + 정렬된 데이터 컬럼
     consol_final_cols = label_col + consol_cols_sorted
     separate_final_cols = label_col + separate_cols_sorted
 
-    # 분리된 DataFrame
     df_consol = df_all[consol_final_cols]
     df_separate = df_all[separate_final_cols]
+    
+    del df_all
+    gc.collect()
 
     return df_separate, df_consol
 
-def df_merge(df_a001, df_a002, df_a003):
 
-
-    # label_ko 컬럼 추출
+def df_merge_for_year(df_a001, df_a002, df_a003, year):
+    """
+    특정 연도의 분기별 데이터를 병합합니다.
+    """
     label_col = [col for col in df_a003.columns if col == 'label_ko'][0]
-
-    # 기준 label_ko로 병합을 위한 기준 DF 생성
     df_base = df_a003[[label_col]].copy()
 
-    # 기준 날짜
-    endYear = df_a003.columns[1][0][:4]
-    begYear = df_a003.columns[-1][0][:4]
+    str_year = str(year)
     q1_cols, q2_cols, q3_cols, q4_cols = [], [], [], []
 
-    for year in range(int(endYear), int(begYear)-1, -1):
-        year = str(year)
+    # df_a001, df_a002, df_a003에 해당 연도의 데이터만 있다고 가정합니다.
     
-        # separate = '별도재무제표'
-        # connect = '연결재무제표'
+    # 재무제표 구분 (연결/별도) - 컬럼 구조에 따라 동적으로 가져옵니다.
+    # 만약 df_a001, df_a002, df_a003이 비어있을 수 있으므로 체크
+    type_sc = None
+    if not df_a001.empty and len(df_a001.columns) > 1 and isinstance(df_a001.columns[1], tuple):
         type_sc = df_a001.columns[1][1][0]
+    elif not df_a002.empty and len(df_a002.columns) > 1 and isinstance(df_a002.columns[1], tuple):
+        type_sc = df_a002.columns[1][1][0]
+    elif not df_a003.empty and len(df_a003.columns) > 1 and isinstance(df_a003.columns[1], tuple):
+        type_sc = df_a003.columns[1][1][0]
 
-        # 날짜 포맷 기준 (시작일-종료일, 재무제표 구분)
-        q1_col = (f'{year}0101-{year}0331', (type_sc,))
-        q2_col = (f'{year}0401-{year}0630', (type_sc,))  # 계산 필요
-        q3_col = (f'{year}0701-{year}0930', (type_sc,))
-        q4_col = (f'{year}1001-{year}1231', (type_sc,))  # 계산 필요
-        q123_col = (f'{year}0101-{year}0930', (type_sc,))
-        y1_col = (f'{year}0101-{year}1231', (type_sc,))
+    if type_sc is None: # 재무제표 타입 정보를 찾을 수 없는 경우
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
+    q1_col = (f'{str_year}0101-{str_year}0331', (type_sc,))
+    q2_col = (f'{str_year}0401-{str_year}0630', (type_sc,))
+    q3_col = (f'{str_year}0701-{str_year}0930', (type_sc,))
+    q4_col_full_year = (f'{str_year}0101-{str_year}1231', (type_sc,)) # 연간
+    q4_col_q123 = (f'{str_year}0101-{str_year}0930', (type_sc,)) # 1-3분기 누적
 
-        # Q1
-        if q1_col in df_a003.columns:
-            df_base[f'{year}_Q1'] = df_a003.get(q1_col)
-            q1_cols.append(f'{year}_Q1')
-        # Q2
-        if q2_col in df_a002.columns:
-            df_base[f'{year}_Q2'] = df_a002.get(q2_col)
-            q2_cols.append(f'{year}_Q2')
+    # Q1
+    if q1_col in df_a003.columns:
+        df_base[f'{str_year}_Q1'] = df_a003.get(q1_col)
+        q1_cols.append(f'{str_year}_Q1')
 
-        # Q3
-        if q3_col in df_a003.columns:
-            df_base[f'{year}_Q3'] = df_a003.get(q3_col)
-            q3_cols.append(f'{year}_Q3')
+    # Q2
+    if q2_col in df_a002.columns:
+        df_base[f'{str_year}_Q2'] = df_a002.get(q2_col)
+        q2_cols.append(f'{str_year}_Q2')
 
-        # Q4
-        if y1_col in df_a001.columns and q123_col in df_a003.columns:
-            df_base[f'{year}_Q4'] = df_a001.get(y1_col) - df_a003.get(q123_col)
-            q4_cols.append(f'{year}_Q4')
+    # Q3
+    if q3_col in df_a003.columns:
+        df_base[f'{str_year}_Q3'] = df_a003.get(q3_col)
+        q3_cols.append(f'{str_year}_Q3')
 
+    # Q4 (연간 데이터 - 1-3분기 누적 데이터)
+    if q4_col_full_year in df_a001.columns and q4_col_q123 in df_a003.columns:
+        df_base[f'{str_year}_Q4'] = df_a001.get(q4_col_full_year) - df_a003.get(q4_col_q123)
+        q4_cols.append(f'{str_year}_Q4')
 
-        cols = df_base.columns.tolist()
+    cols = df_base.columns.tolist()
+    quarter_cols = [col for col in cols if col != 'label_ko']
 
-        # 'label_ko'는 따로 빼고 나머지 분기 컬럼만 추출
-        quarter_cols = [col for col in cols if col != 'label_ko']
-
-        # 분기 컬럼을 날짜 기준으로 정렬 (최근 순서)
+    if quarter_cols: # 분기 데이터가 있는 경우만 정렬
         sorted_quarters = sorted(
             quarter_cols,
-            key=lambda x: (int(x[:4]), int(x[-1])),  # ('2024_Q3' → (2024, 3))
+            key=lambda x: (int(x[:4]), int(x[-1])),
             reverse=True
         )
-
-        # 새 컬럼 순서: label_ko + 최근 분기 순서
         new_cols = ['label_ko'] + sorted_quarters
-
-        # 컬럼 순서 재정렬
         df_base = df_base[new_cols]
-    return df_base, df_base[['label_ko']+q1_cols], df_base[['label_ko']+q2_cols], df_base[['label_ko']+q3_cols], df_base[['label_ko']+q4_cols], 
+    else: # 분기 데이터가 없는 경우 label_ko만 남김
+        df_base = df_base[['label_ko']]
     
-def get_income_by_name(corp_name, corp_market, bgn_de, end_de):
-        
-    # 삼성전자 code
-    # corp_code = '00336570'
-    # corp_name = '원텍'
-    # corp_market = 'K' # 'Y': 코스피, 'K': 코스닥, 'N': 코넥스, 'E': 기타
+    # 각 분기별 DF를 생성 (해당 연도 데이터만 포함)
+    df_total = df_base
+    df_q1 = df_base[['label_ko'] + q1_cols] if q1_cols else pd.DataFrame(columns=['label_ko'])
+    df_q2 = df_base[['label_ko'] + q2_cols] if q2_cols else pd.DataFrame(columns=['label_ko'])
+    df_q3 = df_base[['label_ko'] + q3_cols] if q3_cols else pd.DataFrame(columns=['label_ko'])
+    df_q4 = df_base[['label_ko'] + q4_cols] if q4_cols else pd.DataFrame(columns=['label_ko'])
+
+    return df_total, df_q1, df_q2, df_q3, df_q4
 
 
-    # 모든 상장된 기업 리스트 불러오기
-    corp_list = dart.get_corp_list() 
-    clists = corp_list.find_by_corp_name(corp_name=corp_name, exactly=True, market = corp_market)
-    print(clists)
+def get_income_by_name(corp_name, corp_market, bgn_de, end_de, filepath):
+    """
+    기업의 재무제표를 연도별로 조회하여 엑셀 파일에 저장합니다.
+    """
+    corp_list = dart.get_corp_list()
+    clists = corp_list.find_by_corp_name(corp_name=corp_name, exactly=True, market=corp_market)
+    if not clists:
+        raise ValueError(f"기업명 '{corp_name}' ({corp_market})을(를) 찾을 수 없습니다.")
     corp = clists[0]
 
-    # 반기보고서 검색
-    reports_a001 = corp.search_filings(bgn_de=bgn_de, end_de=end_de, pblntf_detail_ty='a001')
-    reports_a002 = corp.search_filings(bgn_de=bgn_de, end_de=end_de, pblntf_detail_ty='a002')
-    reports_a003 = corp.search_filings(bgn_de=bgn_de, end_de=end_de, pblntf_detail_ty='a003')
+    # 전체 기간에 대한 보고서 리스트를 한 번에 가져옵니다.
+    # 각 보고서 객체 자체는 가볍지만, XBRL 데이터를 로드할 때 메모리를 많이 사용합니다.
+    # 따라서 extract_df_for_year에서 필요한 연도의 XBRL만 로드하도록 합니다.
+    reports_a001_all = corp.search_filings(bgn_de=bgn_de, end_de=end_de, pblntf_detail_ty='a001')
+    reports_a002_all = corp.search_filings(bgn_de=bgn_de, end_de=end_de, pblntf_detail_ty='a002')
+    reports_a003_all = corp.search_filings(bgn_de=bgn_de, end_de=end_de, pblntf_detail_ty='a003')
 
-
-
-    # a001
-    df_a001_sep, df_a001_con = extract_df(reports_a001)
-    # a002
-    df_a002_sep, df_a002_con = extract_df(reports_a002)
-    # a003
-    df_a003_sep, df_a003_con = extract_df(reports_a003)
-
-    df_con_total, df_con_q1, df_con_q2, df_con_q3, df_con_q4 = df_merge(df_a001_con, df_a002_con, df_a003_con)
-    df_sep_total, df_sep_q1, df_sep_q2, df_sep_q3, df_sep_q4, = df_merge(df_a001_sep, df_a002_sep, df_a003_sep)
+    start_year = int(bgn_de[:4])
+    end_year = int(end_de[:4])
     
-    
-    dfs = [
-        ('전체분기_별도', df_sep_total),
-        ('전체분기_연결', df_con_total),
-        ('Q1_별도', df_sep_q1),
-        ('Q2_별도', df_sep_q2),
-        ('Q3_별도', df_sep_q3),
-        ('Q4_별도', df_sep_q4),
-        ('Q1_연결', df_con_q1),
-        ('Q2_연결', df_con_q2),
-        ('Q3_연결', df_con_q3),
-        ('Q4_연결', df_con_q4),
-    ]
+    # ExcelWriter는 파일 핸들을 유지하며 시트를 추가하므로, 전체 과정에서 한 번만 생성합니다.
+    with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
+        for year in range(end_year, start_year - 1, -1): # 최신 연도부터 과거 연도 순으로 처리
+            print(f"📡 {year}년도 데이터 처리 중...")
+            
+            # 각 연도별로 데이터를 추출
+            # extract_df_for_year는 해당 연도의 보고서만 필터링하여 처리합니다.
+            df_a001_sep, df_a001_con = extract_df_for_year(reports_a001_all, year, separate=False)
+            df_a002_sep, df_a002_con = extract_df_for_year(reports_a002_all, year, separate=False)
+            df_a003_sep, df_a003_con = extract_df_for_year(reports_a003_all, year, separate=False)
+            
+            # 각 연도별로 병합된 데이터 프레임 생성
+            df_con_total, df_con_q1, df_con_q2, df_con_q3, df_con_q4 = df_merge_for_year(df_a001_con, df_a002_con, df_a003_con, year)
+            df_sep_total, df_sep_q1, df_sep_q2, df_sep_q3, df_sep_q4 = df_merge_for_year(df_a001_sep, df_a002_sep, df_a003_sep, year)
 
-    return dfs
+            # 데이터가 비어있지 않은 경우에만 엑셀에 저장
+            if not df_sep_total.empty:
+                df_sep_total.to_excel(writer, sheet_name=f'별도_전체_{year}'[:31], index=False)
+            if not df_con_total.empty:
+                df_con_total.to_excel(writer, sheet_name=f'연결_전체_{year}'[:31], index=False)
+            if not df_sep_q1.empty:
+                df_sep_q1.to_excel(writer, sheet_name=f'별도_Q1_{year}'[:31], index=False)
+            if not df_sep_q2.empty:
+                df_sep_q2.to_excel(writer, sheet_name=f'별도_Q2_{year}'[:31], index=False)
+            if not df_sep_q3.empty:
+                df_sep_q3.to_excel(writer, sheet_name=f'별도_Q3_{year}'[:31], index=False)
+            if not df_sep_q4.empty:
+                df_sep_q4.to_excel(writer, sheet_name=f'별도_Q4_{year}'[:31], index=False)
+            if not df_con_q1.empty:
+                df_con_q1.to_excel(writer, sheet_name=f'연결_Q1_{year}'[:31], index=False)
+            if not df_con_q2.empty:
+                df_con_q2.to_excel(writer, sheet_name=f'연결_Q2_{year}'[:31], index=False)
+            if not df_con_q3.empty:
+                df_con_q3.to_excel(writer, sheet_name=f'연결_Q3_{year}'[:31], index=False)
+            if not df_con_q4.empty:
+                df_con_q4.to_excel(writer, sheet_name=f'연결_Q4_{year}'[:31], index=False)
 
+            # 현재 연도와 관련된 모든 DataFrame을 명시적으로 삭제
+            del df_a001_sep, df_a001_con, df_a002_sep, df_a002_con, df_a003_sep, df_a003_con
+            del df_con_total, df_con_q1, df_con_q2, df_con_q3, df_con_q4
+            del df_sep_total, df_sep_q1, df_sep_q2, df_sep_q3, df_sep_q4
+            gc.collect() # 가비지 컬렉션 실행
 
-
-    from openpyxl.utils import get_column_letter
-    from openpyxl.styles import numbers
-    from openpyxl import load_workbook
-
-    # Excel 파일로 저장
-    with pd.ExcelWriter('포과손익계산서.xlsx', engine='openpyxl') as writer:
-        df_sep_total.to_excel(writer, sheet_name='전체분기_별도', index=False)
-        df_con_total.to_excel(writer, sheet_name='전체분기_연결', index=False)
-        df_sep_q1.to_excel(writer, sheet_name='Q1_별도', index=False)
-        df_sep_q2.to_excel(writer, sheet_name='Q2_별도', index=False)
-        df_sep_q3.to_excel(writer, sheet_name='Q3_별도', index=False)
-        df_sep_q4.to_excel(writer, sheet_name='Q4_별도', index=False)
-        df_con_q1.to_excel(writer, sheet_name='Q1_연결', index=False)
-        df_con_q2.to_excel(writer, sheet_name='Q2_연결', index=False)
-        df_con_q3.to_excel(writer, sheet_name='Q3_연결', index=False)
-        df_con_q4.to_excel(writer, sheet_name='Q4_연결', index=False)
-
-    # 저장한 파일을 다시 불러와 포맷 적용
-    wb = load_workbook('포과손익계산서.xlsx')
-
-    for sheetname in wb.sheetnames:
-        ws = wb[sheetname]
-        
-        # A열 (label_ko) 너비 넓히기
-        ws.column_dimensions['A'].width = 40
-        
-        
-        # B열부터 마지막 열까지 숫자 형식 적용 (천 단위 쉼표)
-        for col in range(2, ws.max_column + 1):
-            col_letter = get_column_letter(col)
-            for row in range(2, ws.max_row + 1):  # header 제외
-                cell = ws[f'{col_letter}{row}']
-                if isinstance(cell.value, (int, float)):
-                    cell.number_format = '#,##0'  # 천 단위 쉼표
-            ws.column_dimensions[col_letter].width = 20
-
-
-    # 다시 저장
-    wb.save('포과손익계산서.xlsx')
+    # 파일 경로만 반환 (app.py에서 다운로드 및 후처리)
+    return filepath
