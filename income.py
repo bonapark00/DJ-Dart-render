@@ -1,6 +1,8 @@
 import dart_fss as dart
 import pandas as pd
 from pandas import to_datetime
+import gc
+
 
 dart.set_api_key(api_key='8b1e1ecff1d195b34f0af2b7cc263e09275bfedf')
 
@@ -73,6 +75,11 @@ def extract_df(reports, separate = False): # 연결(False, 기본)
 
     # 모든 연도별 현금흐름표를 하나의 DF로 병합
     df_all = pd.concat(df_list, ignore_index=True)
+    
+    ## garbage collect
+    del df_list
+    gc.collect()
+    
     if 'label_ko_1' in df_all.columns:
         df_all['label_ko'] = df_all['label_ko_0'].combine_first(df_all['label_ko_1'])
         df_all.drop(columns = ['label_ko_0', 'label_ko_1'], inplace=True)
@@ -83,17 +90,6 @@ def extract_df(reports, separate = False): # 연결(False, 기본)
     # label_ko_0,1 정보들도 합쳐주기
     df_all = df_all.groupby('label_ko', as_index=False).first()
 
-
-    # # 분기 조건을 만족하는 column만 남기기
-    # quarter_columns = [
-    #     col for col in df_all.columns
-    #     if col != 'label_ko' and isinstance(col, tuple) and
-    #     (to_datetime(col[0].split('-')[1]) - to_datetime(col[0].split('-')[0])).days <= 100
-    # ]
-    # print()
-
-    # # label_ko는 유지하고, 필터링된 column만 선택
-    # df_all = df_all[['label_ko'] + quarter_columns]
 
     cols = df_all.columns
 
